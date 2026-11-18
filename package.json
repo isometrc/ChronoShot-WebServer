@@ -15,5 +15,8 @@
   "bugs": {
     "url": "https://github.com/isometrc/ChronoShot-WebServer/issues"
   },
-  "homepage": "https://github.com/isometrc/ChronoShot-WebServer#readme"
+  "homepage": "https://github.com/isometrc/ChronoShot-WebServer#readme",
+  "dependencies": {
+    "mysql2": "^3.24.6"
+  }
 }
