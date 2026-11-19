@@ -17,6 +17,7 @@
   },
   "homepage": "https://github.com/isometrc/ChronoShot-WebServer#readme",
   "dependencies": {
+    "http": "^0.0.1-security",
     "mysql2": "^3.24.6"
   }
 }
