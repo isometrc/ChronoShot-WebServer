@@ -18,6 +18,9 @@ let databasePassword = process.env.CHRONOSHOT_DB_PASSWORD;
 let webServerIPAddress = "0.0.0.0";
 let webServerPort = 80;
 
+// General configuration information.
+const maxRecords = 50;
+
 // This only prepares the connection using the above information.
 // It does not begin the connection yet.
 const mysqlConnection = mysql.createConnection({
@@ -38,103 +41,204 @@ mysqlConnection.connect(function(error) {
 	console.log('Connected to the leaderboard database.');
 });
 
-// This function returns the player scores for:
-// a certain course (if holeID is empty), or
-// a certain hole in a course (if neither argument is empty).
-function fetchLeaderboard(courseName, holeID) {
-	let databaseQuery = '';
+// Returns the ID of the first course found with the same name as courseName.
+function fetchCourseID(courseName) {
+	let databaseQuery = 'SELECT course_id FROM courses WHERE course_name = ? LIMIT 1';
+	let values = [courseName];
+	let requestResult = null;
 
-	if (holeID == '') {
-		databaseQuery = 'SELECT * FROM `player_scores_course` WHERE `course_name` = `';
-		databaseQuery += courseName + '`';
-	} else {
-		databaseQuery = 'SELECT * FROM `player_scores_hole` WHERE `hole_id` = `';
-		databaseQuery += holeID + '` AND `course_name` = `';
-		databaseQuery += courseName + '`';
-	}
-
-	// This will become a list of dictionaries where each
-	// key is the column name and the value is the its value.
-	let databaseQueryResult = null;
-	(error, results, fields) => {
-		// Any error will crash the web server.
-		// A database query that returns nothing will not fail; it
-		// will just return an empty array.
+	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
 		if (error) throw error;
-		databaseQueryResult = results;
-	}
+		requestResult = rows[0]['course_id'];
+	});
 
-	return databaseQueryResults;
+	return requestResult;
 }
 
-// Returns a list of holes given a course name.
-// A course could have any number of holes, so it is unknown how many
-// leaderboard pages will be needed to display the scores for each hole.
-// These results could populate a dropdown in the client that allows a player
-// to select which hole to view the leaderboard of.
-function fetchCourseHoles(courseName) {
-	databaseQuery = 'SELECT `hole_id` FROM `holes` WHERE `course_name` = `';
-	databaseQuery += courseName + '`';
+// Returns the number of holes in the course with course the given courseID.
+function fetchCourseHoleCount(courseID) {
+	// limit is probably unnecessary, as the course_id is the primary key.
+	let databaseQuery = 'SELECT holes from courses WHERE course_id = ? LIMIT 1';
+	let values = [courseID];
+	let requestResult = null;
 
-	let databaseQueryResult = null;
-
-	(error, results, fields) => {
-		// Crashes on error.
-		// Results will be an empty array if no records are found.
+	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
 		if (error) throw error;
-		databaseQueryResult = results;
+		requestResult = rows[0]['holes'];
+	});
+
+	return requestResult;
+}
+
+// Returns a list of a list of key-value pairs where index 0 is the list of
+// cumulative score stats records across all the holes in the course and
+// indices 1, 2, 3... are the lists of specific hole score stats records.
+function fetchLeaderboard(courseName) {
+	let databaseQuery = '';
+	let values = [];
+	let requestResponse = {};
+	let courseID = fetchCourseID(courseName);
+
+	// Gets cumulative score stats records for the course.
+	// These records are stored at index 0 of the response object.
+	databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_course_scores WHERE course_id = ? LIMIT ?';
+	values = [courseID, maxRecords];
+
+	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
+		if (error) throw error;
+		requestResponse[0] = rows;
+	});
+
+	// Gets score stats records for each hole in the course.
+	// <holeNumber>'s records are stored in the <holeNumber> index in the response object.
+	let holeCount = fetchCourseHoleCount(courseID);
+
+	for (let i = 0; i < holeCount + 1; i++) {
+		databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_hole_scores WHERE course_id = ? AND hole_id = ? LIMIT ?';
+		values = [courseID, i, maxRecords];
+
+		mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
+			if (error) throw error;
+			requestResponse[i + 1] = rows;
+		});
 	}
 
-	return databaseQueryResults;
+	return requestResponse;
+}
+
+// Inserts a cumulative or hole-specific list of results into the leaderboard.
+function addResultsToLeaderboard(resultsJSON, courseName, holeNumber, cumulative) {
+	let results = JSON.parse(resultsJSON);
+	let databaseQuery = "";
+	let values = [];
+	let insertedCount = 0;
+	let courseID = fetchCourseID(courseName);
+
+	if (cumulative)
+		databaseQuery = 'INSERT INTO player_course_scores (name, score, hits, time_spent, course_id) VALUES (?, ?, ?, ?, ?)';
+	else
+		databaseQuery = 'INSERT INTO player_hole_scores (name, score, hits, time_spent, course_id, hole_id) VALUES (?, ?, ?, ?, ?, ?)';
+
+	for (let i = 0; i < results.length; i++) {
+		values = [
+			cumulativeResults[i]['PlayerName'],
+			cumulativeResults[i]['PlayerScore'],
+			cumulativeResults[i]['PlayerHits'],
+			cumulativeResults[i]['PlayerTimeSpent'],
+			courseID
+		];
+
+		if (cumulative) values.push(holeNumber);
+
+		mysqlConnection.execute(databaseQuery, values, (error, result, resultMetadata) => {
+			if (error) throw error;
+			insertedCount += result['affectedRows'];
+		});
+	}
+
+	return insertedCount;
 }
 
 // Defines the behavior of the web server.
 // This does not start the server: that is done by listen().
 // The response is sent when an end() call is reached.
-// The end() function effectively acts as a 'return'.
-// This function is ugly and non-functional.
 const webServer = http.createServer((request, response) =>{
 	// Request urls will be in a '/x/y/z' format
 	// Therefore, splitting by '/' should leave an
 	// empty element at position 0.
 	let requestURLSplit = request.url.split('/');
-	let operationResult = null;
-	let errorMessage = '';
+	let errorMessage = 'Unspecified error with request.';
 
-	switch(request.method) {
-		case "GET":
-			// /holes/'course_name' should return the course's hole IDs.
-			if (requestURLSplit.Count == 3 &&
-				requestURLSplit[0] == '' &&
-				requestURLSplit[1] == 'holes' &&
-				requestURLSplit[2] != '') {
-				operationResult = fetchCourseHoles(requestURLSplit[2]);
-				break;
-			}
+	if (request.method == 'GET') {
+		// Course leaderboard requests should be in /leaderboard/courseName format.
+		if (requestURLSplit.length == 3 &&
+			requestURLSplit[1] == 'leaderboard' &&
+			requestURLSplit[2].length != 0) {
+			let operationResult = fetchLeaderboard(requestURLSplit[2]);
 
-			// /leaderboard/course/ should return the leaderboard for the course.
-			// /leaderboard/course/n should return the leaderboard for the nth hole.
-			if (requestURLSplit.Count == 4 &&
-				(requestURLSplit[0] != '' ||
-				requestURLSplit[1] != 'leaderboard' ||
-				requestURLSplit[2] != 'course' ||
-				(requestURLSplit[3] != '' &&
-				!isNaN(requestURLSplit[3])))) {
-				errorMessage = 'URL of GET requests should be "/leaderboard/course/*"';
-				break;
+			response.writeHead(200, {'content-type': 'application/json'});
+			response.end(JSON.stringify(operationResult));
+
+			return;
+		} else {
+			// The game client should look for the 'error' field to know when an error has occured.
+			if (errorMessage != '') {
+				response.writeHead(400, {'content-type': 'application/json'});
+				response.end(JSON.stringify({error: errorMessage}));
+
+				return;
 			}
+		}
+	} else if (request.method == 'POST') {
+		// Handles posting a cumulative record to the database.
+		// The request's URI should be '/leaderboard/courseName'
+		if (requestURLSplit.length == 3 &&
+			requestURLSplit[1] == 'leaderboard' &&
+			requestURLSplit[2].length != 0) {
+			// The data will not be sent all at once, but in chunks.
+			let data = '';
+			request.on('data', chunk => {data += chunk.toString()});
+
+			// Called once all the data has been received.
+			request.on('end', () => {
+				let insertedCount =
+					addResultsToLeaderboard(data,
+					requestURLSplit[2],
+					0,
+					true);
+
+				response.writeHead(200, {'content-type': 'application/json'});
+				response.end(JSON.stringify({inserted: insertedCount}));
+
+				success = true;
+			});
+
+			return;
+		} else {
+			// The game client should look for the 'error' field to know when an error has occured.
+			if (errorMessage != '') {
+				response.writeHead(400, {'content-type': 'application/json'});
+				response.end(JSON.stringify({error: errorMessage}));
+
+				return;
+			}
+		}
+
+		// Handles posting results related to a specific hole to the database.
+		// The request's URI should be '/leaderboard/courseName/holeNumber'
+		if (requestURLSplit.length == 4 &&
+			requestURLSplit[1] == 'leaderboard' &&
+			requestURLSplit[2].length != 0 &&
+			!isNaN(requestURLSplit[3])) {
+			// Data sent in chunks, not all at once.
+			let data = '';
+			request.on('data', chunk => {data += chunk.toString()});
+
+			// Called once all the data has been received.
+			request.on('end', () => {
+				let insertedCount = addResultsToLeaderboard(data,
+					requestURLSplit[2],
+					requestURLSplit[3],
+					false);
+
+				response.writeHead(200, {'content-type': 'application/json'});
+				response.end(JSON.stringify({inserted: insertedCount}));
+
+				success = true;
+			});
+
+			return;
+		} else {
+			// The game client should look for the 'error' field to know when an error has occured.
+			if (errorMessage != '') {
+				response.writeHead(400, {'content-type': 'application/json'});
+				response.end(JSON.stringify({error: errorMessage}));
+
+				return;
+			}
+		}
 	}
 
-	// The game client should look for the 'error' field to know when an error has occured.
-	if (errorMessage != '') {
-		response.writeHead(400, {'content-type': 'application/json'});
-		response.end(JSON.strisngify({error: errorMessage}));
-	}
-
-	// Only reasonable operation left.
-	operationResult = fetchLeaderboard(requestURLSplit[2], requestURLSplit[3]);
-	response.writeHead(200, {'content-type': 'application/json'});
-	response.end(operationResult);
 });
 
 // Begins accepting connections on the given port and address.
