@@ -1,0 +1,23 @@
+{
+  "name": "chronoshot-webserver",
+  "version": "1.0.0",
+  "description": "Handles requests for online resources made by ChronoShot clients.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isometrc/ChronoShot-WebServer.git"
+  },
+  "author": "Team-1",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/isometrc/ChronoShot-WebServer/issues"
+  },
+  "homepage": "https://github.com/isometrc/ChronoShot-WebServer#readme",
+  "dependencies": {
+    "http": "^0.0.1-security",
+    "mysql2": "^3.24.6"
+  }
+}

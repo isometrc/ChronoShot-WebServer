@@ -155,3 +155,14 @@ vite.config.ts.timestamp-*
 .nx/cache
 .nx/workspace-data
 .nx/migrate-runs
+
+# USER DEFINED IGNORES BEGIN HERE
+# Don't want to publish the certificate.
+certificates/*
+
+# Want to allow just the readme in the certificates folder.
+!certificates/README.md
+
+# Don't want to add swap files (temporary files used to save editing progress)
+*.swp
+*.swo
