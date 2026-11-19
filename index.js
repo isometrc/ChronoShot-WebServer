@@ -1,4 +1,4 @@
-const mysql = require('mysql2');
+const mysql = require('mysql2/promise');
 const filesystem = require('fs');
 const http = require('http');
 
@@ -23,7 +23,7 @@ const maxRecords = 50;
 
 // This only prepares the connection using the above information.
 // It does not begin the connection yet.
-const mysqlConnection = mysql.createConnection({
+const mysqlConnection = mysql.createPool({
 	host: databaseHost,
 	port: databasePort,
 	user: databaseUsername,
@@ -32,53 +32,44 @@ const mysqlConnection = mysql.createConnection({
 	database: leaderboardDatabase
 });
 
-// The connection is actually started here, with the argument being
-// the function called when the connection process has been completed
-// (successfully or not). "error" is only filled if not.
-mysqlConnection.connect(function(error) {
-	if (error) throw error;
-
-	console.log('Connected to the leaderboard database.');
-});
-
 // Returns the ID of the first course found with the same name as courseName.
-function fetchCourseID(courseName) {
+async function fetchCourseID(courseName) {
 	let databaseQuery = 'SELECT course_id FROM courses WHERE course_name = ? LIMIT 1';
 	let values = [courseName];
 	let requestResult = null;
 
-	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
-		if (error) throw error;
-		requestResult = rows[0]['course_id'];
-	});
+	try {
+		const [rows] = await mysqlConnection.execute(databaseQuery, values);
+		if (rows.length > 0) requestResult = rows[0].course_id;
+	} catch (error) {throw error;}
 
 	return requestResult;
 }
 
 // Returns the ID of the first hole found with the given courseID and holeNumber.
-function fetchHoleID(courseID, holeNumber) {
+async function fetchHoleID(courseID, holeNumber) {
 	let databaseQuery = 'SELECT hole_id FROM holes WHERE course_id = ? AND hole_number = ? LIMIT 1';
 	let values = [courseID, holeNumber];
 	let requestResult = null;
-
-	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
-		if (error) throw error;
-		requestResult = rows[0]['hole_id'];
-	});
+	
+	try {
+		const [rows] = await mysqlConnection.execute(databaseQuery, values);
+		if (rows.length > 0) requestResult = rows[0].hole_id;
+	} catch (error) {throw error;}
 
 	return requestResult;
 }
 
 // Returns the number of holes in the course with course the given courseID.
-function fetchCourseHoleCount(courseID) {
-	let databaseQuery = 'SELECT hole_id from courses WHERE course_id = ?';
+async function fetchCourseHoleCount(courseID) {
+	let databaseQuery = 'SELECT hole_id FROM holes WHERE course_id = ?';
 	let values = [courseID];
 	let requestResult = null;
-
-	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
-		if (error) throw error;
+	
+	try {
+		const [rows] = await mysqlConnection.execute(databaseQuery, values);
 		requestResult = rows.length;
-	});
+	} catch (error) {throw error;}
 
 	return requestResult;
 }
@@ -86,25 +77,26 @@ function fetchCourseHoleCount(courseID) {
 // Returns a list of a list of key-value pairs where index 0 is the list of
 // cumulative score stats records across all the holes in the course and
 // indices 1, 2, 3... are the lists of specific hole score stats records.
-function fetchLeaderboard(courseName) {
+async function fetchLeaderboard(courseName) {
 	let databaseQuery = '';
 	let values = [];
 	let requestResponse = {};
-	let courseID = fetchCourseID(courseName);
+	const courseID = await fetchCourseID(courseName);
 
 	// Gets score stats records for each hole in the course.
 	// holeNumber 0 refers to the cumulative total across all holes in the course.
 	// <holeNumber>'s records are stored in the <holeNumber> index in the response object.
-	let holeCount = fetchCourseHoleCount(courseID);
+	const holeCount = await fetchCourseHoleCount(courseID);
 
-	for (let i = 0; i < holeCount ; i++) {
-		databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_scores WHERE course_id = ? AND hole_number = ? LIMIT ?';
-		values = [courseID, i, maxRecords];
+	for (let i = 0; i < holeCount; i++) {
+		const holeID = await fetchHoleID(courseID, i);
+		databaseQuery = 'SELECT player_name, score, hits, time_spent FROM player_scores WHERE course_id = ? AND hole_id = ? ORDER BY score DESC LIMIT ?';
+		values = [courseID, holeID, maxRecords];
 
-		mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
-			if (error) throw error;
+		try {
+			const [rows] = await mysqlConnection.execute(databaseQuery, values);
 			requestResponse[i] = rows;
-		});
+		} catch (error) {throw error;}
 	}
 
 	return requestResponse;
@@ -112,30 +104,30 @@ function fetchLeaderboard(courseName) {
 
 // Inserts a cumulative or hole-specific list of results into the leaderboard.
 // Cumulative if the hole number is 0, specific to the hole number otherwise.
-function addResultsToLeaderboard(resultsJSON, courseName, holeNumber) {
+async function addResultsToLeaderboard(resultsJSON, courseName, holeNumber) {
 	let results = JSON.parse(resultsJSON);
 
-	let databaseQuery = 'INSERT INTO player_scores (name, score, hits, time_spent, course_id, hole_number) VALUES (?, ?, ?, ?, ?, ?)';
+	let databaseQuery = 'INSERT INTO player_scores (player_name, score, hits, time_spent, course_id, hole_id) VALUES (?, ?, ?, ?, ?, ?)';
 	let values = [];
 	let insertedCount = 0;
 
-	let courseID = fetchCourseID(courseName);
-	let holeID = fetchHoleID(courseID, holeNumber);
+	const courseID = await fetchCourseID(courseName);
+	const holeID = await fetchHoleID(courseID, holeNumber);
 
 	for (let i = 0; i < results.length; i++) {
 		values = [
-			cumulativeResults[i]['PlayerName'],
-			cumulativeResults[i]['PlayerScore'],
-			cumulativeResults[i]['PlayerHits'],
-			cumulativeResults[i]['PlayerTimeSpent'],
+			results[i].PlayerName,
+			results[i].PlayerScore,
+			results[i].PlayerHits,
+			results[i].PlayerTimeSpent,
 			courseID,
-			holeNumber
+			holeID
 		];
 
-		mysqlConnection.execute(databaseQuery, values, (error, result, resultMetadata) => {
-			if (error) throw error;
-			insertedCount += result['affectedRows'];
-		});
+		try {
+			const [result] = await mysqlConnection.execute(databaseQuery, values);
+			insertedCount += result.affectedRows;
+		} catch (error) {throw error;}
 	}
 
 	return insertedCount;
@@ -144,11 +136,12 @@ function addResultsToLeaderboard(resultsJSON, courseName, holeNumber) {
 // Defines the behavior of the web server.
 // This does not start the server: that is done by listen().
 // The response is sent when an end() call is reached.
-const webServer = http.createServer((request, response) =>{
+const webServer = http.createServer(async(request, response) =>{
 	// Request urls will be in a '/x/y/z' format
 	// Therefore, splitting by '/' should leave an
 	// empty element at position 0.
-	let requestURLSplit = request.url.split('/');
+	let decodedURL = decodeURIComponent(request.url);
+	let requestURLSplit = decodedURL.split('/');
 	let errorMessage = 'Unspecified error with request.';
 
 	if (request.method == 'GET') {
@@ -156,12 +149,14 @@ const webServer = http.createServer((request, response) =>{
 		if (requestURLSplit.length == 3 &&
 			requestURLSplit[1] == 'leaderboard' &&
 			requestURLSplit[2].length != 0) {
-			let operationResult = fetchLeaderboard(requestURLSplit[2]);
+			try {
+				const operationResult = await fetchLeaderboard(requestURLSplit[2]);
+			
+				response.writeHead(200, {'content-type': 'application/json'});
+				response.end(JSON.stringify(operationResult));
 
-			response.writeHead(200, {'content-type': 'application/json'});
-			response.end(JSON.stringify(operationResult));
-
-			return;
+				return;
+			} catch (error) {throw error;}
 		} else {
 			// The game client should look for the 'error' field to know when an error has occured.
 			if (errorMessage != '') {
@@ -185,16 +180,16 @@ const webServer = http.createServer((request, response) =>{
 			request.on('data', chunk => {data += chunk.toString()});
 
 			// Called once all the data has been received.
-			request.on('end', () => {
-				let insertedCount = addResultsToLeaderboard(
-					data,
-					requestURLSplit[2],
-					requestURLSplit[3]);
+			request.on('end', async () => {
+				try {
+					const insertedCount = await addResultsToLeaderboard(
+						data,
+						requestURLSplit[2],
+						requestURLSplit[3]);
 
-				response.writeHead(200, {'content-type': 'application/json'});
-				response.end(JSON.stringify({inserted: insertedCount}));
-
-				success = true;
+					response.writeHead(200, {'content-type': 'application/json'});
+					response.end(JSON.stringify({inserted: insertedCount}));
+				} catch (error) {throw error;}
 			});
 
 			return;
