@@ -165,3 +165,4 @@ certificates/*
 
 # Don't want to add swap files (temporary files used to save editing progress)
 *.swp
+*.swo
