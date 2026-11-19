@@ -55,16 +55,29 @@ function fetchCourseID(courseName) {
 	return requestResult;
 }
 
+// Returns the ID of the first hole found with the given courseID and holeNumber.
+function fetchHoleID(courseID, holeNumber) {
+	let databaseQuery = 'SELECT hole_id FROM holes WHERE course_id = ? AND hole_number = ? LIMIT 1';
+	let values = [courseID, holeNumber];
+	let requestResult = null;
+
+	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
+		if (error) throw error;
+		requestResult = rows[0]['hole_id'];
+	});
+
+	return requestResult;
+}
+
 // Returns the number of holes in the course with course the given courseID.
 function fetchCourseHoleCount(courseID) {
-	// limit is probably unnecessary, as the course_id is the primary key.
-	let databaseQuery = 'SELECT holes from courses WHERE course_id = ? LIMIT 1';
+	let databaseQuery = 'SELECT hole_id from courses WHERE course_id = ?';
 	let values = [courseID];
 	let requestResult = null;
 
 	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
 		if (error) throw error;
-		requestResult = rows[0]['holes'];
+		requestResult = rows.length;
 	});
 
 	return requestResult;
@@ -79,27 +92,18 @@ function fetchLeaderboard(courseName) {
 	let requestResponse = {};
 	let courseID = fetchCourseID(courseName);
 
-	// Gets cumulative score stats records for the course.
-	// These records are stored at index 0 of the response object.
-	databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_course_scores WHERE course_id = ? LIMIT ?';
-	values = [courseID, maxRecords];
-
-	mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
-		if (error) throw error;
-		requestResponse[0] = rows;
-	});
-
 	// Gets score stats records for each hole in the course.
+	// holeNumber 0 refers to the cumulative total across all holes in the course.
 	// <holeNumber>'s records are stored in the <holeNumber> index in the response object.
 	let holeCount = fetchCourseHoleCount(courseID);
 
-	for (let i = 0; i < holeCount + 1; i++) {
-		databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_hole_scores WHERE course_id = ? AND hole_id = ? LIMIT ?';
+	for (let i = 0; i < holeCount ; i++) {
+		databaseQuery = 'SELECT (name, score, hits, time_spent) FROM player_scores WHERE course_id = ? AND hole_number = ? LIMIT ?';
 		values = [courseID, i, maxRecords];
 
 		mysqlConnection.execute(databaseQuery, values, (error, rows, rowsMetadata) => {
 			if (error) throw error;
-			requestResponse[i + 1] = rows;
+			requestResponse[i] = rows;
 		});
 	}
 
@@ -107,17 +111,16 @@ function fetchLeaderboard(courseName) {
 }
 
 // Inserts a cumulative or hole-specific list of results into the leaderboard.
-function addResultsToLeaderboard(resultsJSON, courseName, holeNumber, cumulative) {
+// Cumulative if the hole number is 0, specific to the hole number otherwise.
+function addResultsToLeaderboard(resultsJSON, courseName, holeNumber) {
 	let results = JSON.parse(resultsJSON);
-	let databaseQuery = "";
+
+	let databaseQuery = 'INSERT INTO player_scores (name, score, hits, time_spent, course_id, hole_number) VALUES (?, ?, ?, ?, ?, ?)';
 	let values = [];
 	let insertedCount = 0;
-	let courseID = fetchCourseID(courseName);
 
-	if (cumulative)
-		databaseQuery = 'INSERT INTO player_course_scores (name, score, hits, time_spent, course_id) VALUES (?, ?, ?, ?, ?)';
-	else
-		databaseQuery = 'INSERT INTO player_hole_scores (name, score, hits, time_spent, course_id, hole_id) VALUES (?, ?, ?, ?, ?, ?)';
+	let courseID = fetchCourseID(courseName);
+	let holeID = fetchHoleID(courseID, holeNumber);
 
 	for (let i = 0; i < results.length; i++) {
 		values = [
@@ -125,10 +128,9 @@ function addResultsToLeaderboard(resultsJSON, courseName, holeNumber, cumulative
 			cumulativeResults[i]['PlayerScore'],
 			cumulativeResults[i]['PlayerHits'],
 			cumulativeResults[i]['PlayerTimeSpent'],
-			courseID
+			courseID,
+			holeNumber
 		];
-
-		if (cumulative) values.push(holeNumber);
 
 		mysqlConnection.execute(databaseQuery, values, (error, result, resultMetadata) => {
 			if (error) throw error;
@@ -170,41 +172,9 @@ const webServer = http.createServer((request, response) =>{
 			}
 		}
 	} else if (request.method == 'POST') {
-		// Handles posting a cumulative record to the database.
-		// The request's URI should be '/leaderboard/courseName'
-		if (requestURLSplit.length == 3 &&
-			requestURLSplit[1] == 'leaderboard' &&
-			requestURLSplit[2].length != 0) {
-			// The data will not be sent all at once, but in chunks.
-			let data = '';
-			request.on('data', chunk => {data += chunk.toString()});
-
-			// Called once all the data has been received.
-			request.on('end', () => {
-				let insertedCount =
-					addResultsToLeaderboard(data,
-					requestURLSplit[2],
-					0,
-					true);
-
-				response.writeHead(200, {'content-type': 'application/json'});
-				response.end(JSON.stringify({inserted: insertedCount}));
-
-				success = true;
-			});
-
-			return;
-		} else {
-			// The game client should look for the 'error' field to know when an error has occured.
-			if (errorMessage != '') {
-				response.writeHead(400, {'content-type': 'application/json'});
-				response.end(JSON.stringify({error: errorMessage}));
-
-				return;
-			}
-		}
-
 		// Handles posting results related to a specific hole to the database.
+		// If the hole number is 0, the results being stored are the cumulative
+		// results (sum across all holes in a course).
 		// The request's URI should be '/leaderboard/courseName/holeNumber'
 		if (requestURLSplit.length == 4 &&
 			requestURLSplit[1] == 'leaderboard' &&
@@ -216,10 +186,10 @@ const webServer = http.createServer((request, response) =>{
 
 			// Called once all the data has been received.
 			request.on('end', () => {
-				let insertedCount = addResultsToLeaderboard(data,
+				let insertedCount = addResultsToLeaderboard(
+					data,
 					requestURLSplit[2],
-					requestURLSplit[3],
-					false);
+					requestURLSplit[3]);
 
 				response.writeHead(200, {'content-type': 'application/json'});
 				response.end(JSON.stringify({inserted: insertedCount}));
